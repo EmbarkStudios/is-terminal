@@ -36,7 +36,7 @@ use std::os::hermit::io::AsRawFd;
 #[cfg(windows)]
 use std::os::windows::io::AsRawHandle;
 #[cfg(windows)]
-use windows_sys::Win32::Foundation::HANDLE;
+const MAX_PATH: usize = 260;
 
 /// Extension trait to check whether something is a terminal.
 pub trait IsTerminal {
@@ -97,8 +97,44 @@ impl<Stream: AsFilelike> IsTerminal for Stream {
 // d7b0bcb20f2f7d5f3ea3489d56ece630147e98f5.
 
 #[cfg(windows)]
+mod bindings {
+    #![allow(non_camel_case_types, non_upper_case_globals)]
+
+    pub type BOOL = i32;
+    pub type HANDLE = isize;
+
+    pub type CONSOLE_MODE = u32;
+
+    pub type STD_HANDLE = u32;
+    pub const STD_INPUT_HANDLE: STD_HANDLE = 4294967286;
+    pub const STD_OUTPUT_HANDLE: STD_HANDLE = 4294967285;
+    pub const STD_ERROR_HANDLE: STD_HANDLE = 4294967284;
+
+    pub type FILE_INFO_BY_HANDLE_CLASS = i32;
+    pub const FileNameInfo: FILE_INFO_BY_HANDLE_CLASS = 2;
+
+    pub type FILE_TYPE = u32;
+    pub const FILE_TYPE_PIPE: FILE_TYPE = 3;
+
+    #[link(name = "kernel32", kind = "raw-dylib")]
+    extern "system" {
+        pub fn GetConsoleMode(hConsoleHandle: HANDLE, lpMode: *mut CONSOLE_MODE) -> BOOL;
+        pub fn GetStdHandle(nStdHandle: STD_HANDLE) -> HANDLE;
+        pub fn GetFileInformationByHandleEx(
+            hFile: HANDLE,
+            FileInformationClass: FILE_INFO_BY_HANDLE_CLASS,
+            lpFileInformation: *mut std::ffi::c_void,
+            dwBufferSize: u32,
+        ) -> BOOL;
+        pub fn GetFileType(hFile: HANDLE) -> FILE_TYPE;
+    }
+}
+#[cfg(windows)]
+use bindings::HANDLE;
+
+#[cfg(windows)]
 fn handle_is_console(handle: BorrowedHandle<'_>) -> bool {
-    use windows_sys::Win32::System::Console::{
+    use bindings::{
         GetConsoleMode, GetStdHandle, STD_ERROR_HANDLE, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE,
     };
 
@@ -140,13 +176,8 @@ fn handle_is_console(handle: BorrowedHandle<'_>) -> bool {
 /// This incoproates d7b0bcb20f2f7d5f3ea3489d56ece630147e98f5
 #[cfg(windows)]
 unsafe fn msys_tty_on(handle: HANDLE) -> bool {
+    use bindings::{FileNameInfo, GetFileInformationByHandleEx, GetFileType, FILE_TYPE_PIPE};
     use std::ffi::c_void;
-    use windows_sys::Win32::{
-        Foundation::MAX_PATH,
-        Storage::FileSystem::{
-            FileNameInfo, GetFileInformationByHandleEx, GetFileType, FILE_TYPE_PIPE,
-        },
-    };
 
     // Early return if the handle is not a pipe.
     if GetFileType(handle) != FILE_TYPE_PIPE {
@@ -159,11 +190,11 @@ unsafe fn msys_tty_on(handle: HANDLE) -> bool {
     #[allow(non_snake_case)]
     struct FILE_NAME_INFO {
         FileNameLength: u32,
-        FileName: [u16; MAX_PATH as usize],
+        FileName: [u16; MAX_PATH],
     }
     let mut name_info = FILE_NAME_INFO {
         FileNameLength: 0,
-        FileName: [0; MAX_PATH as usize],
+        FileName: [0; MAX_PATH],
     };
     // Safety: buffer length is fixed.
     let res = GetFileInformationByHandleEx(
@@ -373,12 +404,11 @@ mod tests {
     #[cfg(windows)]
     fn msys_tty_on_path_length() {
         use std::{fs::File, os::windows::io::AsRawHandle};
-        use windows_sys::Win32::Foundation::MAX_PATH;
 
         let dir = tempfile::tempdir().expect("Unable to create temporary directory");
         let file_path = dir.path().join("ten_chars_".repeat(25));
         // Ensure that the path is longer than MAX_PATH.
-        assert!(file_path.to_string_lossy().len() > MAX_PATH as usize);
+        assert!(file_path.to_string_lossy().len() > MAX_PATH);
         let file = File::create(file_path).expect("Unable to create file");
 
         assert!(!unsafe { crate::msys_tty_on(file.as_raw_handle() as isize) });
